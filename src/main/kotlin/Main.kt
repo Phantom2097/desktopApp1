@@ -12,22 +12,25 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import retrofit2.http.GET
 import tornadofx.*
-import java.net.URLEncoder
+import java.net.URLDecoder
 import java.util.*
 
 interface PaymentService {
-//    @GET("/api/payment")
+    @GET("/payment.json")
     suspend fun getPaymentAmount(): PaymentResponse
 }
 
-data class PaymentResponse(val amount: String)
+data class PaymentResponse(val amount: Int, val currency: String)
 
 class PaymentView : View("Платежное приложение"), CoroutineScope by CoroutineScope(Dispatchers.Default) {
+    private var rawData: String? = null
     private val amount = SimpleStringProperty("0")
-    private val status = SimpleStringProperty("Не подключено")
+    private val currency = SimpleStringProperty("RUB")
+    private val status = SimpleStringProperty("Ожидание данных...")
     private val loading = SimpleBooleanProperty(false)
-    private val errorUrl = SimpleStringProperty("")
+    private val websiteUrl = SimpleStringProperty("https://serebrovskaya.github.io/ifAppNotFound/")
 
     private val paymentService by lazy {
         Retrofit.Builder()
@@ -35,17 +38,6 @@ class PaymentView : View("Платежное приложение"), CoroutineSc
             .addConverterFactory(GsonConverterFactory.create())
             .build()
             .create(PaymentService::class.java)
-    }
-
-    init {
-        val app = FX.application as? MainApp
-        val encodedData = app?.initialData
-
-        if (!encodedData.isNullOrBlank()) {
-            val url = app.initialData?.removePrefix("paymentapp://")
-            val data = url?.substringAfter("data=")
-            decodeInitialData(data)
-        }
     }
 
     override val root = vbox {
@@ -71,7 +63,7 @@ class PaymentView : View("Платежное приложение"), CoroutineSc
         }
 
         hbox(spacing = 15) {
-            label("Сумма платежа:") { style { fontSize = 18.px } }
+            label("Сумма:") { style { fontSize = 18.px } }
             label(amount) {
                 bind(amount)
                 style {
@@ -80,34 +72,23 @@ class PaymentView : View("Платежное приложение"), CoroutineSc
                     fontWeight = FontWeight.BOLD
                 }
             }
-        }
-
-        hbox(spacing = 15) {
-            button("Получить сумму платежа") {
-                enableWhen(!loading)
+            label(currency) {
+                bind(currency)
                 style {
-                    fontSize = 16.px
-                    paddingAll = 10
-                    backgroundColor += Color.LIGHTGREEN
-                }
-                action {
-                    fetchPaymentAmount()
+                    fontSize = 18.px
+                    textFill = Color.DARKGREEN
                 }
             }
+        }
 
-            button("Перейти на сайт") {
-                visibleWhen(errorUrl.isNotEmpty) // <-- Кнопка появляется только при ошибке
-                enableWhen(errorUrl.isNotEmpty)
-                style {
-                    fontSize = 16.px
-                    paddingAll = 10
-                    backgroundColor += Color.LIGHTPINK
-                }
-                action {
-                    errorUrl.value.takeIf { it.isNotBlank() }?.let { url ->
-                        FX.application.hostServices.showDocument(url)
-                    }
-                }
+        button("Перейти на сайт") {
+            style {
+                fontSize = 16.px
+                paddingAll = 10
+                backgroundColor += Color.LIGHTPINK
+            }
+            action {
+                openWebsite()
             }
         }
 
@@ -116,44 +97,66 @@ class PaymentView : View("Платежное приложение"), CoroutineSc
         }
     }
 
-    private fun decodeInitialData(encodedData: String?) {
-        try {
-            val decodedJson = String(Base64.getDecoder().decode(encodedData))
-            val jsonObject = Gson().fromJson(decodedJson, Map::class.java)
+    init {
+        // Автоматическая обработка входящих данных при запуске
+        val app = FX.application as? MainApp
+        app?.initialData?.let { url ->
+            rawData = extractDataFromUrl(url)
+            processIncomingData()
+        } ?: fetchPaymentData() // Если данных нет, загружаем с сервера
+    }
 
-            val receivedAmount = (jsonObject["amount"] as? Double)?.toInt()?.toString() ?: "Не указано"
-            val receivedCurrency = jsonObject["currency"] as? String ?: "Не указана валюта"
-
-            runLater {
-                amount.value = "$receivedAmount $receivedCurrency"
-                status.value = "Данные из ссылки получены"
-            }
+    private fun extractDataFromUrl(url: String): String? {
+        return try {
+            val cleanUrl = url.removePrefix("paymentapp://")
+            val dataParam = cleanUrl.substringAfter("data=").substringBefore("&")
+            URLDecoder.decode(dataParam, "UTF-8")
         } catch (e: Exception) {
-            println("Ошибка расшифровки данных: ${e.message}")
-            runLater {
-                status.value = "Ошибка расшифровки данных"
-            }
+            null
         }
     }
 
+    private fun processIncomingData() {
+        try {
+            rawData?.let { data ->
+                val jsonString = Base64.getDecoder().decode(data).toString(Charsets.UTF_8)
+                val paymentData = Gson().fromJson(jsonString, Map::class.java)
 
-    private fun fetchPaymentAmount() {
+                amount.set(paymentData["amount"]?.toString() ?: "0")
+                currency.set(paymentData["currency"]?.toString() ?: "RUB")
+                status.set("Данные получены")
+
+                // Формируем URL для перехода на сайт с исходными данными
+                websiteUrl.set("https://serebrovskaya.github.io/ifAppNotFound/folder_for_pay/index_pay.html?data=$rawData")
+            } ?: run {
+                status.set("Ошибка: неверный формат данных")
+                websiteUrl.set("https://serebrovskaya.github.io/ifAppNotFound/")
+            }
+        } catch (e: Exception) {
+            println("Ошибка обработки данных: ${e.message}")
+            status.set("Ошибка обработки данных")
+            websiteUrl.set("https://serebrovskaya.github.io/ifAppNotFound/")
+            fetchPaymentData()
+        }
+    }
+
+    private fun fetchPaymentData() {
         loading.value = true
-        status.value = "Загрузка..."
-        errorUrl.value = ""
+        status.value = "Загрузка данных..."
+        websiteUrl.set("https://serebrovskaya.github.io/ifAppNotFound/")
 
         launch {
             try {
-                val result = paymentService.getPaymentAmount().amount
+                val response = paymentService.getPaymentAmount()
                 runLater {
-                    amount.value = result
-                    status.value = "Успешно загружено"
+                    amount.value = response.amount.toString()
+                    currency.value = response.currency
+                    status.value = "Данные успешно загружены"
                 }
             } catch (e: Exception) {
                 e.printStackTrace()
                 runLater {
                     status.value = "Ошибка: ${e.message}"
-                    handlePaymentError(e)
                 }
             } finally {
                 runLater {
@@ -163,56 +166,32 @@ class PaymentView : View("Платежное приложение"), CoroutineSc
         }
     }
 
-    /**
-     * Пока что обрабатывает ошибку получения данных, и перекидывает на сайт
-     */
-    private fun handlePaymentError(error: Exception) {
-        try {
-            // Шифрование данных об ошибке (упрощенный пример)
-            val errorData = mapOf(
-                "error" to error.message,
-                "timestamp" to System.currentTimeMillis(),
-                "amount" to amount.value,
-            )
-
-            val jsonData = Gson().toJson(errorData)
-            val encryptedData = Base64.getEncoder().encodeToString(jsonData.toByteArray())
-
-            // Открываем браузер с данными об ошибке
-            val url = "https://serebrovskaya.github.io/ifAppNotFound/folder_for_pay/index_pay.html" +
-                    "?data=${URLEncoder.encode(encryptedData, "UTF-8")}"
-
-            errorUrl.value = url
-
-        } catch (e: Exception) {
-            println("Failed to handle error: ${e.message}")
-        }
-    }
-
-    override fun onDock() {
-        super.onDock()
-        // Инициализация при необходимости
+    private fun openWebsite() {
+        FX.application.hostServices.showDocument(websiteUrl.value)
     }
 
     override fun onUndock() {
-        super.onUndock()
-        // Очистка ресурсов
         cancel()
     }
 }
 
 class MainApp : App(PaymentView::class) {
     var initialData: String? = null
+
     override fun start(stage: Stage) {
-        if (parameters.raw.isNotEmpty()) {
-            initialData = parameters.raw.first()
-        }
         stage.width = 800.0
         stage.height = 600.0
+
+        // Обработка аргументов командной строки
+        if (parameters.raw.isNotEmpty()) {
+            initialData = parameters.raw[0]
+        }
+
         super.start(stage)
     }
 }
 
 fun main(args: Array<String>) {
+    System.setProperty("prism.allowhidpi", "false")
     launch<MainApp>(args)
 }
